@@ -41,9 +41,12 @@ func main() {
 		flag.PrintDefaults()
 	}
 	flag.Parse()
-	flag.VisitAll(func(f *flag.Flag) {
-		klog.Infof("FLAG: --%s=%q", f.Name, f.Value)
-	})
+
+	if klog.V(2).Enabled() {
+		flag.VisitAll(func(f *flag.Flag) {
+			klog.Infof("FLAG: --%s=%q", f.Name, f.Value)
+		})
+	}
 
 	rootCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -148,7 +151,6 @@ func main() {
 		klog.Infoln("\nProcess finished due to TIMEOUT.")
 		os.Exit(1)
 	}
-	klog.Infoln("\nAll executions finished.")
 	os.Exit(0)
 }
 

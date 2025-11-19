@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: krun-test-web
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app: krun-test
+  serviceName: "krun-service"
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: krun-test
+    spec:
+      terminationGracePeriodSeconds: 0
+      containers:
+      - name: main
+        image: busybox
+        command: ["sleep", "3600"]

@@ -36,7 +36,7 @@ spec:
       terminationGracePeriodSeconds: 0
       containers:
       - name: main
-        image: registry.k8s.io/e2e-test-images/busybox:1.29-2
+        image: busybox
         command: ["sleep", "3600"]
 EOF
 
