@@ -51,6 +51,24 @@ teardown() {
     rm -rf "$TEST_DIR"
 }
 
+@test "krun command on pods" {
+
+    # Run krun hostname
+    run "$BATS_TEST_DIRNAME/../bin/krun" \
+        --kubeconfig="$KUBECONFIG" \
+        --namespace="default" \
+        --label-selector="app=upload-target" \
+        --command="hostname"
+    
+    # Debug output if test fails
+    echo "--- krun output ---"
+    echo "$output"
+    echo "-------------------"
+    [ "$status" -eq 0 ]
+    [[ "$output" == "upload-test-0" ]]
+    [[ "$output" == "upload-test-1" ]]
+}
+
 @test "krun uploads a local folder to pods" {
     # 1. Prepare Local Files
     mkdir -p "$TEST_DIR/data"
