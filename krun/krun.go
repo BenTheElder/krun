@@ -103,13 +103,16 @@ func main() {
 
 	klog.V(2).Infof("Found %d pods. Starting execution...\n", len(pods.Items))
 
-	var wg sync.WaitGroup
+	// TODO: Limit concurrency with a worker pool if too many pods?
+	concurrency := len(pods.Items)
+	workerChan := make(chan struct{}, concurrency)
 	var printMutex sync.Mutex
 
 	for _, pod := range pods.Items {
-		wg.Add(1)
 		go func(p corev1.Pod) {
-			defer wg.Done()
+			defer func() {
+				workerChan <- struct{}{}
+			}()
 			prefix := fmt.Sprintf("[%s]", p.Name)
 
 			// --- PHASE 1: UPLOAD (TAR STREAMING) ---
@@ -123,6 +126,8 @@ func main() {
 					if err := makeTar(*uploadSrc, pw); err != nil {
 						// Closing with error ensures the execCmd stream fails fast
 						pw.CloseWithError(err)
+						klog.Errorf("Tar Error: %s %s\n", prefix, err)
+						cancel()
 					}
 				}()
 
@@ -133,11 +138,15 @@ func main() {
 				// Pass 'pr' as Stdin
 				err := execCmd(ctx, config, clientset, p, tarCmd, pr, nil, nil)
 				if err != nil {
-					printWithMutex(&printMutex, prefix, fmt.Sprintf("Upload Failed: %v", err))
+					printMutex.Lock()
+					_, _ = fmt.Fprintf(os.Stderr, "Transfer Error: %s %s\n", prefix, err)
+					printMutex.Unlock()
 					// If upload fails, we probably shouldn't run the command
 					return
 				}
-				printWithMutex(&printMutex, prefix, fmt.Sprintf("Synced %s -> %s", *uploadSrc, *uploadDest))
+				printMutex.Lock()
+				_, _ = fmt.Fprintf(os.Stderr, "%s Synced %s -> %s\n", prefix, *uploadSrc, *uploadDest)
+				printMutex.Unlock()
 			}
 
 			// --- PHASE 2: EXECUTE COMMAND ---
@@ -160,17 +169,24 @@ func main() {
 				_ = pwErr.Close()
 
 				if err != nil {
-					printWithMutex(&printMutex, prefix, fmt.Sprintf("Command Error: %v", err))
+					printMutex.Lock()
+					_, _ = fmt.Fprintf(os.Stderr, "Command Error: %s %s\n", prefix, err)
+					printMutex.Unlock()
 				}
 			}
 		}(pod)
 	}
 
-	wg.Wait()
-	if ctx.Err() == context.DeadlineExceeded {
-		klog.Infoln("\nFinished due to TIMEOUT.")
-		os.Exit(1)
+	for range concurrency {
+		select {
+		case <-ctx.Done():
+			klog.Infof("Context done, cancelling remaining operations... %v", ctx.Err())
+			os.Exit(1)
+		case <-workerChan:
+			// One worker finished
+		}
 	}
+
 }
 
 func execCmd(ctx context.Context, config *rest.Config, clientset *kubernetes.Clientset, pod corev1.Pod, command []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -265,10 +281,4 @@ func logStream(r io.Reader, mu *sync.Mutex, prefix string, out io.Writer) {
 		_, _ = fmt.Fprintf(out, "%s %s\n", prefix, text)
 		mu.Unlock()
 	}
-}
-
-func printWithMutex(mu *sync.Mutex, prefix, text string) {
-	mu.Lock()
-	fmt.Printf("%s %s\n", prefix, text)
-	mu.Unlock()
 }
