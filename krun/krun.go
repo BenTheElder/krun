@@ -108,7 +108,12 @@ func main() {
 	workerChan := make(chan struct{}, concurrency)
 	var printMutex sync.Mutex
 
-	for _, pod := range pods.Items {
+	for i, pod := range pods.Items {
+		if ctx.Err() != nil {
+			klog.Infof("Context done, cancelling remaining %d operations... %v", len(pods.Items)-i, ctx.Err())
+			break
+		}
+
 		go func(p corev1.Pod) {
 			defer func() {
 				workerChan <- struct{}{}
@@ -226,10 +231,22 @@ func makeTar(srcPath string, writer io.Writer) error {
 		return err
 	}
 
-	// If src is a file, base dir is its parent. If dir, it's the dir itself.
-	// This behavior controls whether the folder *itself* appears in the tar or just contents.
-	// For "cp -r src/ dest/", usually we want contents.
-	baseDir := filepath.Dir(absSrcPath)
+	// Check if the source is a directory
+	info, err := os.Stat(srcPath)
+	if err != nil {
+		return err
+	}
+
+	var baseDir string
+	if info.IsDir() {
+		// If it's a directory, we use the directory itself as the base.
+		// This means files inside will have paths relative to the directory,
+		// effectively stripping the directory name from the tar archive.
+		baseDir = absSrcPath
+	} else {
+		// If it's a file, we use its parent as the base, preserving the filename.
+		baseDir = filepath.Dir(absSrcPath)
+	}
 
 	tw := tar.NewWriter(writer)
 	defer tw.Close() //nolint:errcheck
@@ -239,17 +256,25 @@ func makeTar(srcPath string, writer io.Writer) error {
 			return err
 		}
 
+		// Rebase the path so it's relative to the upload root
+		relPath, err := filepath.Rel(baseDir, file)
+		if err != nil {
+			return err
+		}
+
+		// If we are uploading a directory, the walk starts with the directory itself.
+		// Its relative path is ".". We skip adding a tar entry for "." to avoid
+		// messing with the destination root permissions or creating a "./" folder.
+		if relPath == "." {
+			return nil
+		}
+
 		// Create header
 		header, err := tar.FileInfoHeader(fi, fi.Name())
 		if err != nil {
 			return err
 		}
 
-		// Rebase the path so it's relative to the upload root
-		relPath, err := filepath.Rel(baseDir, file)
-		if err != nil {
-			return err
-		}
 		header.Name = relPath
 
 		// Ensure binaries are executable (simple heuristic: if we are uploading, preserve local mode)
