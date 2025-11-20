@@ -119,7 +119,7 @@ func main() {
 
 				// Start Tar Producer
 				go func() {
-					defer pw.Close()
+					defer pw.Close() //nolint:errcheck
 					if err := makeTar(*uploadSrc, pw); err != nil {
 						// Closing with error ensures the execCmd stream fails fast
 						pw.CloseWithError(err)
@@ -216,7 +216,7 @@ func makeTar(srcPath string, writer io.Writer) error {
 	baseDir := filepath.Dir(absSrcPath)
 
 	tw := tar.NewWriter(writer)
-	defer tw.Close()
+	defer tw.Close() //nolint:errcheck
 
 	return filepath.Walk(srcPath, func(file string, fi os.FileInfo, err error) error {
 		if err != nil {
@@ -250,7 +250,7 @@ func makeTar(srcPath string, writer io.Writer) error {
 		if err != nil {
 			return err
 		}
-		defer f.Close()
+		defer f.Close() //nolint:errcheck
 
 		_, err = io.Copy(tw, f)
 		return err
@@ -262,7 +262,7 @@ func logStream(r io.Reader, mu *sync.Mutex, prefix string, out io.Writer) {
 	for scanner.Scan() {
 		text := scanner.Text()
 		mu.Lock()
-		fmt.Fprintf(out, "%s %s\n", prefix, text)
+		_, _ = fmt.Fprintf(out, "%s %s\n", prefix, text)
 		mu.Unlock()
 	}
 }
