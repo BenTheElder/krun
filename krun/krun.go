@@ -136,12 +136,23 @@ func main() {
 					}
 				}()
 
-				// Run 'tar' on the remote pod to consume the stream
-				// mkdir -p ensures dest exists. tar -xmf - -C dest extracts stdin.
-				tarCmd := []string{"/bin/sh", "-c", fmt.Sprintf("mkdir -p '%s' && tar -xmf - -C '%s'", *uploadDest, *uploadDest)}
+				// 1. Create destination directory
+				mkdirCmd := []string{"mkdir", "-p", *uploadDest}
+				// We must provide at least one stream (stdin, stdout, stderr) for k8s exec.
+				err := execCmd(ctx, config, clientset, p, mkdirCmd, nil, io.Discard, nil)
+				if err != nil {
+					printMutex.Lock()
+					_, _ = fmt.Fprintf(os.Stderr, "Mkdir Error: %s %s\n", prefix, err)
+					printMutex.Unlock()
+					// If mkdir fails, we stop
+					return
+				}
+
+				// 2. Run 'tar' to consume the stream
+				tarCmd := []string{"tar", "-xmf", "-", "-C", *uploadDest}
 
 				// Pass 'pr' as Stdin
-				err := execCmd(ctx, config, clientset, p, tarCmd, pr, nil, nil)
+				err = execCmd(ctx, config, clientset, p, tarCmd, pr, nil, nil)
 				if err != nil {
 					printMutex.Lock()
 					_, _ = fmt.Fprintf(os.Stderr, "Transfer Error: %s %s\n", prefix, err)
