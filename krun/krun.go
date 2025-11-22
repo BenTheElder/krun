@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,7 +33,7 @@ var (
 	commandStr    = flag.String("command", "", "Command to execute in pods")
 	uploadSrc     = flag.String("upload-src", "", "Local path to folder/file to upload")
 	uploadDest    = flag.String("upload-dest", "", "Remote path (e.g. /tmp/app)")
-	timeout       = flag.Duration("timeout", 30*time.Second, "Timeout for the execution")
+	timeout       = flag.Duration("timeout", 0, "Timeout for the execution")
 )
 
 func main() {
@@ -62,8 +61,14 @@ func main() {
 	rootCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	ctx, cancel := context.WithTimeout(rootCtx, *timeout)
-	defer cancel()
+	var ctx context.Context
+	var ctxCancel context.CancelFunc
+	if *timeout > 0 {
+		ctx, ctxCancel = context.WithTimeout(rootCtx, *timeout)
+	} else {
+		ctx, ctxCancel = context.WithCancel(rootCtx)
+	}
+	defer ctxCancel()
 
 	// Defer error handling for the metrics server
 	defer runtime.HandleCrash()
@@ -136,12 +141,23 @@ func main() {
 					}
 				}()
 
-				// Run 'tar' on the remote pod to consume the stream
-				// mkdir -p ensures dest exists. tar -xmf - -C dest extracts stdin.
-				tarCmd := []string{"/bin/sh", "-c", fmt.Sprintf("mkdir -p '%s' && tar -xmf - -C '%s'", *uploadDest, *uploadDest)}
+				// 1. Create destination directory
+				mkdirCmd := []string{"mkdir", "-p", *uploadDest}
+				// We must provide at least one stream (stdin, stdout, stderr) for k8s exec.
+				err := execCmd(ctx, config, clientset, p, mkdirCmd, nil, io.Discard, nil)
+				if err != nil {
+					printMutex.Lock()
+					_, _ = fmt.Fprintf(os.Stderr, "Mkdir Error: %s %s\n", prefix, err)
+					printMutex.Unlock()
+					// If mkdir fails, we stop
+					return
+				}
+
+				// 2. Run 'tar' to consume the stream
+				tarCmd := []string{"tar", "-xmf", "-", "-C", *uploadDest}
 
 				// Pass 'pr' as Stdin
-				err := execCmd(ctx, config, clientset, p, tarCmd, pr, nil, nil)
+				err = execCmd(ctx, config, clientset, p, tarCmd, pr, nil, nil)
 				if err != nil {
 					printMutex.Lock()
 					_, _ = fmt.Fprintf(os.Stderr, "Transfer Error: %s %s\n", prefix, err)
@@ -225,25 +241,22 @@ func execCmd(ctx context.Context, config *rest.Config, clientset *kubernetes.Cli
 
 // makeTar walks the source and writes a tarball to the writer
 func makeTar(srcPath string, writer io.Writer) error {
-	srcPath = filepath.Clean(srcPath)
-	absSrcPath, err := filepath.Abs(srcPath)
+	absSrcPath, err := filepath.Abs(filepath.Clean(srcPath))
 	if err != nil {
 		return err
 	}
 
 	// Check if the source is a directory
-	info, err := os.Stat(srcPath)
+	info, err := os.Stat(absSrcPath)
 	if err != nil {
 		return err
 	}
 
-	var baseDir string
-	if info.IsDir() {
-		// If it's a directory, we use the directory itself as the base.
-		// This means files inside will have paths relative to the directory,
-		// effectively stripping the directory name from the tar archive.
-		baseDir = absSrcPath
-	} else {
+	// If it's a directory, we use the directory itself as the base.
+	// This means files inside will have paths relative to the directory,
+	// effectively stripping the directory name from the tar archive.
+	baseDir := absSrcPath
+	if !info.IsDir() {
 		// If it's a file, we use its parent as the base, preserving the filename.
 		baseDir = filepath.Dir(absSrcPath)
 	}
@@ -251,7 +264,7 @@ func makeTar(srcPath string, writer io.Writer) error {
 	tw := tar.NewWriter(writer)
 	defer tw.Close() //nolint:errcheck
 
-	return filepath.Walk(srcPath, func(file string, fi os.FileInfo, err error) error {
+	return filepath.Walk(absSrcPath, func(file string, fi os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
