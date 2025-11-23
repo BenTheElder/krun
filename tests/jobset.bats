@@ -11,6 +11,7 @@ setup_file() {
     echo "Waiting for JobSet controller..."
     kubectl wait --for=condition=Available deployment/jobset-controller-manager -n jobset-system --timeout=120s
 
+    sleep 3
     # Deploy a target workload (JobSet)
     # This creates 2 pods: upload-test-worker-0-0 and upload-test-worker-0-1
     cat <<EOF | kubectl apply -f -
