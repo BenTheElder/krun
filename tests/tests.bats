@@ -54,11 +54,11 @@ teardown() {
 @test "krun command on pods" {
 
     # Run krun hostname
-    run "$BATS_TEST_DIRNAME/../bin/krun" \
+    run "$BATS_TEST_DIRNAME/../bin/krun" run \
         --kubeconfig="$KUBECONFIG" \
         --namespace="default" \
         --label-selector="app=upload-target" \
-        --command="hostname"
+        -- hostname
     
     # Debug output if test fails
     echo "--- krun output ---"
@@ -76,7 +76,7 @@ teardown() {
     echo "Config Data" > "$TEST_DIR/data/config.cfg"
 
     # 2. Run krun upload
-    run "$BATS_TEST_DIRNAME/../bin/krun" \
+    run "$BATS_TEST_DIRNAME/../bin/krun" run \
         --kubeconfig="$KUBECONFIG" \
         --namespace="default" \
         --label-selector="app=upload-target" \
@@ -107,13 +107,13 @@ EOF
 
     # 2. Run krun: Upload -> Execute
     # Note: We upload to /tmp/bin and then execute the specific file
-    run "$BATS_TEST_DIRNAME/../bin/krun" \
+    run "$BATS_TEST_DIRNAME/../bin/krun" run \
         --kubeconfig="$KUBECONFIG" \
         --namespace="default" \
         --label-selector="app=upload-target" \
         --upload-src="$TEST_DIR/scripts" \
         --upload-dest="/tmp/bin" \
-        --command="/bin/sh /tmp/bin/myscript.sh"
+        -- /bin/sh -c "/tmp/bin/myscript.sh"
 
     [ "$status" -eq 0 ]
 
@@ -144,7 +144,7 @@ EOF
     # 2. Run krun with exclude pattern
     # We use a regex that matches either .log extension OR the secret directory
     # Regex: \.log$|secret
-    run "$BATS_TEST_DIRNAME/../bin/krun" \
+    run "$BATS_TEST_DIRNAME/../bin/krun" run \
         --kubeconfig="$KUBECONFIG" \
         --namespace="default" \
         --label-selector="app=upload-target" \

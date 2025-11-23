@@ -9,7 +9,7 @@ export GO111MODULE CGO_ENABLED
 .PHONY: all build 
 build: 
 	@echo "Building all binaries..."
-	GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o ./bin/krun ./krun
+	GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o ./bin/krun .
 
 clean:
 	rm -rf "$(OUT_DIR)/"
