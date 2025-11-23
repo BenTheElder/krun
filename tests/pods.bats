@@ -3,11 +3,7 @@
 load 'common'
 
 setup_file() {
-    # 1. Build the latest krun binary
-    echo "Building krun binary..."
-    (cd "$BATS_TEST_DIRNAME/.." && make build)
-
-    # 2. Deploy a target app (Busybox ensures 'tar' is available)
+    # Deploy a target app (Busybox ensures 'tar' is available)
     # Using a StatefulSet to get stable names (upload-test-0, upload-test-1)
     cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
@@ -33,7 +29,7 @@ spec:
         command: ["sleep", "3600"]
 EOF
 
-    # 3. Wait for pods
+    # Wait for pods
     wait_for_pod_ready "default" "upload-test-0"
     wait_for_pod_ready "default" "upload-test-1"
 }
@@ -54,11 +50,11 @@ teardown() {
 @test "krun command on pods" {
 
     # Run krun hostname
-    run "$BATS_TEST_DIRNAME/../bin/krun" \
+    run "$BATS_TEST_DIRNAME/../bin/krun" run \
         --kubeconfig="$KUBECONFIG" \
         --namespace="default" \
         --label-selector="app=upload-target" \
-        --command="hostname"
+        -- hostname
     
     # Debug output if test fails
     echo "--- krun output ---"
@@ -76,7 +72,7 @@ teardown() {
     echo "Config Data" > "$TEST_DIR/data/config.cfg"
 
     # 2. Run krun upload
-    run "$BATS_TEST_DIRNAME/../bin/krun" \
+    run "$BATS_TEST_DIRNAME/../bin/krun" run \
         --kubeconfig="$KUBECONFIG" \
         --namespace="default" \
         --label-selector="app=upload-target" \
@@ -107,13 +103,13 @@ EOF
 
     # 2. Run krun: Upload -> Execute
     # Note: We upload to /tmp/bin and then execute the specific file
-    run "$BATS_TEST_DIRNAME/../bin/krun" \
+    run "$BATS_TEST_DIRNAME/../bin/krun" run \
         --kubeconfig="$KUBECONFIG" \
         --namespace="default" \
         --label-selector="app=upload-target" \
         --upload-src="$TEST_DIR/scripts" \
         --upload-dest="/tmp/bin" \
-        --command="/bin/sh /tmp/bin/myscript.sh"
+        -- /bin/sh -c "/tmp/bin/myscript.sh"
 
     [ "$status" -eq 0 ]
 
@@ -144,7 +140,7 @@ EOF
     # 2. Run krun with exclude pattern
     # We use a regex that matches either .log extension OR the secret directory
     # Regex: \.log$|secret
-    run "$BATS_TEST_DIRNAME/../bin/krun" \
+    run "$BATS_TEST_DIRNAME/../bin/krun" run \
         --kubeconfig="$KUBECONFIG" \
         --namespace="default" \
         --label-selector="app=upload-target" \

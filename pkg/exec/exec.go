@@ -1,132 +1,38 @@
-package main
+package exec
 
 import (
 	"archive/tar"
 	"bufio"
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"sync"
-	"syscall"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
-	"k8s.io/client-go/util/homedir"
 	"k8s.io/klog/v2"
 )
 
-var (
-	kubeconfig     = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
-	labelSelector  = flag.String("label-selector", "app=my-app", "Label selector for pods")
-	namespace      = flag.String("namespace", "default", "Kubernetes namespace")
-	commandStr     = flag.String("command", "", "Command to execute in pods")
-	uploadSrc      = flag.String("upload-src", "", "Local path to folder/file to upload")
-	uploadDest     = flag.String("upload-dest", "", "Remote path (e.g. /tmp/app)")
-	timeout        = flag.Duration("timeout", 0, "Timeout for the execution")
-	excludePattern = flag.String("exclude", "", "Regex pattern to exclude files when uploading")
-	excludeRegex   *regexp.Regexp
-)
+func UploadAndExecuteOnPods(ctx context.Context, config *rest.Config, clientset *kubernetes.Clientset, pods []corev1.Pod, uploadSrc, uploadDest string, excludeRegex *regexp.Regexp, commandArgs []string) error {
 
-func main() {
-	klog.InitFlags(nil)
-	flag.Usage = func() {
-		fmt.Fprint(os.Stderr, "Usage: krun [options]\n\n")
-		flag.PrintDefaults()
-	}
-	flag.Parse()
-
-	if klog.V(2).Enabled() {
-		flag.VisitAll(func(f *flag.Flag) {
-			klog.Infof("FLAG: --%s=%q", f.Name, f.Value)
-		})
-	}
-
-	// We allow command ONLY, upload ONLY, or BOTH.
-	if *commandStr == "" && *uploadSrc == "" {
-		klog.Fatal("You must provide either --command or --upload-src (or both)")
-	}
-	if *uploadSrc != "" && *uploadDest == "" {
-		klog.Fatal("If --upload-src is provided, --upload-dest is required")
-	}
-
-	if *excludePattern != "" {
-		var err error
-		excludeRegex, err = regexp.Compile(*excludePattern)
-		if err != nil {
-			klog.Fatalf("Invalid exclude pattern: %v", err)
-		}
-	}
-
-	rootCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	klog.V(2).Infof("Found %d pods. Starting execution...\n", len(pods))
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	var ctx context.Context
-	var ctxCancel context.CancelFunc
-	if *timeout > 0 {
-		ctx, ctxCancel = context.WithTimeout(rootCtx, *timeout)
-	} else {
-		ctx, ctxCancel = context.WithCancel(rootCtx)
-	}
-	defer ctxCancel()
-
-	// Defer error handling for the metrics server
-	defer runtime.HandleCrash()
-
-	var config *rest.Config
-	var err error
-	if *kubeconfig == "" {
-		if home := homedir.HomeDir(); home != "" {
-			*kubeconfig = filepath.Join(home, ".kube", "config")
-		} else {
-			*kubeconfig = os.Getenv("KUBECONFIG")
-		}
-	}
-	config, err = clientcmd.BuildConfigFromFlags("", *kubeconfig)
-	if err != nil {
-		klog.Fatalf("can not create client-go configuration: %v", err)
-	}
-
-	// creates the clientset
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		klog.Fatalf("can not create client-go client: %v", err)
-	}
-
-	// Find the pods to execute on
-	pods, err := clientset.CoreV1().Pods(*namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: *labelSelector,
-	})
-	if err != nil {
-		klog.Fatalf("failed to get pods: %v", err)
-	}
-
-	if len(pods.Items) == 0 {
-		klog.Infoln("No pods found with selector:", labelSelector)
-		os.Exit(0)
-	}
-
-	klog.V(2).Infof("Found %d pods. Starting execution...\n", len(pods.Items))
-
 	// TODO: Limit concurrency with a worker pool if too many pods?
-	concurrency := len(pods.Items)
+	concurrency := len(pods)
 	workerChan := make(chan struct{}, concurrency)
 	var printMutex sync.Mutex
 
-	for i, pod := range pods.Items {
+	for i, pod := range pods {
 		if ctx.Err() != nil {
-			klog.Infof("Context done, cancelling remaining %d operations... %v", len(pods.Items)-i, ctx.Err())
+			klog.Infof("Context done, cancelling remaining %d operations... %v", len(pods)-i, ctx.Err())
 			break
 		}
 
@@ -137,14 +43,14 @@ func main() {
 			prefix := fmt.Sprintf("[%s]", p.Name)
 
 			// --- PHASE 1: UPLOAD (TAR STREAMING) ---
-			if *uploadSrc != "" {
+			if uploadSrc != "" {
 				// We create a pipe: makeTar writes to 'pw', execCmd reads from 'pr'
 				pr, pw := io.Pipe()
 
 				// Start Tar Producer
 				go func() {
 					defer pw.Close() //nolint:errcheck
-					if err := makeTar(*uploadSrc, pw, excludeRegex); err != nil {
+					if err := makeTar(uploadSrc, pw, excludeRegex); err != nil {
 						// Closing with error ensures the execCmd stream fails fast
 						pw.CloseWithError(err)
 						klog.Errorf("Tar Error: %s %s\n", prefix, err)
@@ -153,7 +59,7 @@ func main() {
 				}()
 
 				// 1. Create destination directory
-				mkdirCmd := []string{"mkdir", "-p", *uploadDest}
+				mkdirCmd := []string{"mkdir", "-p", uploadDest}
 				// We must provide at least one stream (stdin, stdout, stderr) for k8s exec.
 				err := execCmd(ctx, config, clientset, p, mkdirCmd, nil, io.Discard, nil)
 				if err != nil {
@@ -165,7 +71,7 @@ func main() {
 				}
 
 				// 2. Run 'tar' to consume the stream
-				tarCmd := []string{"tar", "-xmf", "-", "-C", *uploadDest}
+				tarCmd := []string{"tar", "-xmf", "-", "-C", uploadDest}
 
 				// Pass 'pr' as Stdin
 				err = execCmd(ctx, config, clientset, p, tarCmd, pr, nil, nil)
@@ -177,15 +83,11 @@ func main() {
 					return
 				}
 				printMutex.Lock()
-				_, _ = fmt.Fprintf(os.Stderr, "%s Synced %s -> %s\n", prefix, *uploadSrc, *uploadDest)
+				_, _ = fmt.Fprintf(os.Stderr, "%s Synced %s -> %s\n", prefix, uploadSrc, uploadDest)
 				printMutex.Unlock()
 			}
 
-			// --- PHASE 2: EXECUTE COMMAND ---
-			if *commandStr != "" {
-				// Parse command (simple split for now, can be improved with shlex like library)
-				cmdArray := strings.Fields(*commandStr)
-
+			if len(commandArgs) > 0 {
 				// Prepare pipes for output
 				prOut, pwOut := io.Pipe()
 				prErr, pwErr := io.Pipe()
@@ -195,7 +97,7 @@ func main() {
 				go logStream(prErr, &printMutex, prefix, os.Stderr)
 
 				// Execute
-				err := execCmd(ctx, config, clientset, p, cmdArray, nil, pwOut, pwErr)
+				err := execCmd(ctx, config, clientset, p, commandArgs, nil, pwOut, pwErr)
 
 				_ = pwOut.Close()
 				_ = pwErr.Close()
@@ -213,12 +115,12 @@ func main() {
 		select {
 		case <-ctx.Done():
 			klog.Infof("Context done, cancelling remaining operations... %v", ctx.Err())
-			os.Exit(1)
+			return ctx.Err()
 		case <-workerChan:
 			// One worker finished
 		}
 	}
-
+	return nil
 }
 
 func execCmd(ctx context.Context, config *rest.Config, clientset *kubernetes.Clientset, pod corev1.Pod, command []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -248,6 +150,16 @@ func execCmd(ctx context.Context, config *rest.Config, clientset *kubernetes.Cli
 		Stdout: stdout,
 		Stderr: stderr,
 	})
+}
+
+func logStream(r io.Reader, mu *sync.Mutex, prefix string, out io.Writer) {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		text := scanner.Text()
+		mu.Lock()
+		_, _ = fmt.Fprintf(out, "%s %s\n", prefix, text)
+		mu.Unlock()
+	}
 }
 
 // makeTar walks the source and writes a tarball to the writer
@@ -329,14 +241,4 @@ func makeTar(srcPath string, writer io.Writer, excludeRegex *regexp.Regexp) erro
 		_, err = io.Copy(tw, f)
 		return err
 	})
-}
-
-func logStream(r io.Reader, mu *sync.Mutex, prefix string, out io.Writer) {
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		text := scanner.Text()
-		mu.Lock()
-		_, _ = fmt.Fprintf(out, "%s %s\n", prefix, text)
-		mu.Unlock()
-	}
 }
