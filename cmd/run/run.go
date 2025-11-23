@@ -33,8 +33,8 @@ var (
 var RunCmd = &cobra.Command{
 	Use:   "run [flags] -- [command...]",
 	Short: "Run a command or upload files to matching pods",
-	Example: `  # Run a command on pods belonging to a JobSet
-  krun run --jobset-name=stoelinga -- pip install -r requirements.txt
+	Example: `  # Run a command on pods belonging to Pods labeled with app=backend
+  krun run --label-selector=app=backend -- pip install -r requirements.txt
 
   # Upload files and run a script
   krun run --label-selector=app=backend --upload-src=./bin --upload-dest=/tmp/bin -- /tmp/bin/start.sh`,
